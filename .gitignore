@@ -1,0 +1,21 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/proxy
+/dummy-http
+/dummy-grpc
+
+# Test & coverage artifacts
+*.test
+*.out
+coverage.html
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
