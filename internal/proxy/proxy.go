@@ -5,10 +5,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"time"
 
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/config"
+	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/router"
 )
 
 // NewTransport constructs an http.Transport tuned for persistent upstream connection pooling.
@@ -28,30 +28,37 @@ func NewTransport(cfg config.TransportConfig) *http.Transport {
 	}
 }
 
-// Proxy forwards incoming HTTP requests to an upstream backend using a pooled transport.
+// Proxy routes incoming requests via path-prefix matching and forwards them upstream.
 type Proxy struct {
+	router    *router.Router
 	transport *http.Transport
-	target    *url.URL
 }
 
-// New creates a core L7 reverse proxy targeting the given upstream URL.
-func New(target *url.URL, transportCfg config.TransportConfig) *Proxy {
+// New creates a path-routed L7 reverse proxy using a pooled upstream transport.
+func New(r *router.Router, transportCfg config.TransportConfig) *Proxy {
 	return &Proxy{
+		router:    r,
 		transport: NewTransport(transportCfg),
-		target:    target,
 	}
 }
 
-// ServeHTTP forwards the incoming request to the upstream target.
+// ServeHTTP matches the request path to a route and forwards it to the matched pool.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	route, ok := p.router.Match(r.URL.Path)
+	if !ok || len(route.Backends) == 0 {
+		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		return
+	}
+
+	target := route.Backends[0]
 	rp := &httputil.ReverseProxy{
 		Transport: p.transport,
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(p.target)
+			pr.SetURL(target)
 			pr.SetXForwarded()
 		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
-			log.Printf("proxy error [%s %s -> %s]: %v", req.Method, req.URL.Path, p.target.Host, err)
+			log.Printf("proxy error [%s %s -> %s]: %v", req.Method, req.URL.Path, target.Host, err)
 			http.Error(rw, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		},
 	}

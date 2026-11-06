@@ -4,11 +4,11 @@ import (
 	"flag"
 	"log"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/config"
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/proxy"
+	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/router"
 )
 
 func main() {
@@ -20,20 +20,19 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	firstPool := cfg.Pools[cfg.Routes[0].Pool]
-	target, err := url.Parse(firstPool.Backends[0])
+	rt, err := router.New(cfg)
 	if err != nil {
-		log.Fatalf("invalid backend URL: %v", err)
+		log.Fatalf("failed to build router: %v", err)
 	}
 
-	handler := proxy.New(target, cfg.Transport)
+	handler := proxy.New(rt, cfg.Transport)
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	log.Printf("l7-reverse-proxy listening on %s -> %s", cfg.ListenAddr, target)
+	log.Printf("l7-reverse-proxy listening on %s (%d routes)", cfg.ListenAddr, len(cfg.Routes))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
