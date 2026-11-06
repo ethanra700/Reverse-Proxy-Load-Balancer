@@ -6,43 +6,46 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/balancer"
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/config"
 )
 
-// Route associates a URL path prefix with a backend pool.
+// Route associates a URL path prefix with a load-balanced backend pool.
 type Route struct {
-	Prefix   string
-	PoolName string
-	Protocol string
-	Backends []*url.URL
+	Prefix string
+	Pool   *balancer.Pool
 }
 
 // Router performs longest-prefix path matching against configured routes.
 type Router struct {
 	routes []*Route
+	pools  map[string]*balancer.Pool
 }
 
 // New builds a Router from a validated configuration, ordering routes longest-prefix first.
 func New(cfg *config.Config) (*Router, error) {
-	routes := make([]*Route, 0, len(cfg.Routes))
-	for _, rc := range cfg.Routes {
-		poolCfg, ok := cfg.Pools[rc.Pool]
-		if !ok {
-			return nil, fmt.Errorf("route %q references unknown pool %q", rc.Prefix, rc.Pool)
-		}
-		backends := make([]*url.URL, 0, len(poolCfg.Backends))
+	pools := make(map[string]*balancer.Pool, len(cfg.Pools))
+	for name, poolCfg := range cfg.Pools {
+		urls := make([]*url.URL, 0, len(poolCfg.Backends))
 		for _, raw := range poolCfg.Backends {
 			u, err := url.Parse(raw)
 			if err != nil {
-				return nil, fmt.Errorf("parse backend %q: %w", raw, err)
+				return nil, fmt.Errorf("pool %q: parse backend %q: %w", name, raw, err)
 			}
-			backends = append(backends, u)
+			urls = append(urls, u)
+		}
+		pools[name] = balancer.NewPool(name, poolCfg.Protocol, urls)
+	}
+
+	routes := make([]*Route, 0, len(cfg.Routes))
+	for _, rc := range cfg.Routes {
+		pool, ok := pools[rc.Pool]
+		if !ok {
+			return nil, fmt.Errorf("route %q references unknown pool %q", rc.Prefix, rc.Pool)
 		}
 		routes = append(routes, &Route{
-			Prefix:   rc.Prefix,
-			PoolName: rc.Pool,
-			Protocol: poolCfg.Protocol,
-			Backends: backends,
+			Prefix: rc.Prefix,
+			Pool:   pool,
 		})
 	}
 
@@ -50,7 +53,10 @@ func New(cfg *config.Config) (*Router, error) {
 		return len(routes[i].Prefix) > len(routes[j].Prefix)
 	})
 
-	return &Router{routes: routes}, nil
+	return &Router{
+		routes: routes,
+		pools:  pools,
+	}, nil
 }
 
 // Match returns the route with the longest matching path prefix for path.
@@ -61,6 +67,15 @@ func (r *Router) Match(path string) (*Route, bool) {
 		}
 	}
 	return nil, false
+}
+
+// AllBackends returns a flat list of every backend across all configured pools.
+func (r *Router) AllBackends() []*balancer.Backend {
+	var all []*balancer.Backend
+	for _, pool := range r.pools {
+		all = append(all, pool.Backends()...)
+	}
+	return all
 }
 
 func matchesPrefix(path, prefix string) bool {
