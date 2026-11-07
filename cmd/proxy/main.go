@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
 	"time"
 
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/config"
+	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/health"
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/proxy"
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/router"
 )
@@ -24,6 +26,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to build router: %v", err)
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	checker := health.NewChecker(cfg.HealthCheck, rt.AllBackends)
+	go checker.Run(ctx)
 
 	handler := proxy.New(rt, cfg.Transport)
 	srv := &http.Server{
