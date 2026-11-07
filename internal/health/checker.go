@@ -95,7 +95,20 @@ func (c *Checker) CheckBackend(ctx context.Context, b *balancer.Backend) bool {
 	prev := b.IsHealthy()
 	b.SetHealthy(healthy)
 	if prev != healthy {
-		log.Printf("health check [%s]: healthy=%v", b.URL.Host, healthy)
+		if healthy {
+			log.Printf("health check [%s]: recovered (healthy=true)", b.URL.Host)
+		} else {
+			log.Printf("health check [%s]: marked unhealthy (healthy=false)", b.URL.Host)
+		}
 	}
 	return healthy
+}
+
+// RecordPassiveFailure updates a backend's consecutive failure count and logs if tripped unhealthy.
+func RecordPassiveFailure(b *balancer.Backend, threshold int32) bool {
+	if b.RecordFailure(threshold) {
+		log.Printf("passive health [%s]: tripped unhealthy after %d consecutive failures", b.URL.Host, threshold)
+		return true
+	}
+	return false
 }

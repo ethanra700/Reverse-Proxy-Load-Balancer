@@ -8,9 +8,10 @@ import (
 
 // Backend represents a single upstream server tracked with lock-free atomic state.
 type Backend struct {
-	URL     *url.URL
-	active  atomic.Int64
-	healthy atomic.Bool
+	URL                 *url.URL
+	active              atomic.Int64
+	healthy             atomic.Bool
+	consecutiveFailures atomic.Int32
 }
 
 // NewBackend creates a Backend initialized as healthy with zero active connections.
@@ -43,6 +44,33 @@ func (b *Backend) IsHealthy() bool {
 // SetHealthy updates the backend health status atomically.
 func (b *Backend) SetHealthy(ok bool) {
 	b.healthy.Store(ok)
+	if ok {
+		b.consecutiveFailures.Store(0)
+	}
+}
+
+// ConsecutiveFailures returns the current passive consecutive failure count.
+func (b *Backend) ConsecutiveFailures() int32 {
+	return b.consecutiveFailures.Load()
+}
+
+// RecordSuccess resets the passive consecutive failure counter.
+func (b *Backend) RecordSuccess() {
+	b.consecutiveFailures.Store(0)
+}
+
+// RecordFailure increments consecutive failures and marks the backend unhealthy
+// once threshold is reached. Returns true if the backend was tripped unhealthy.
+func (b *Backend) RecordFailure(threshold int32) bool {
+	if threshold < 1 {
+		threshold = 1
+	}
+	failures := b.consecutiveFailures.Add(1)
+	if failures >= threshold {
+		b.healthy.Store(false)
+		return true
+	}
+	return false
 }
 
 // String returns the backend's URL string.

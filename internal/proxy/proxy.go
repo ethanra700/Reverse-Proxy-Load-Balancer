@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/config"
+	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/health"
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/router"
 )
 
@@ -30,15 +31,20 @@ func NewTransport(cfg config.TransportConfig) *http.Transport {
 
 // Proxy routes incoming requests and load-balances them across healthy backends.
 type Proxy struct {
-	router    *router.Router
-	transport *http.Transport
+	router             *router.Router
+	transport          *http.Transport
+	unhealthyThreshold int32
 }
 
 // New creates a load-balanced L7 reverse proxy using a pooled upstream transport.
-func New(r *router.Router, transportCfg config.TransportConfig) *Proxy {
+func New(r *router.Router, transportCfg config.TransportConfig, unhealthyThreshold int32) *Proxy {
+	if unhealthyThreshold < 1 {
+		unhealthyThreshold = 3
+	}
 	return &Proxy{
-		router:    r,
-		transport: NewTransport(transportCfg),
+		router:             r,
+		transport:          NewTransport(transportCfg),
+		unhealthyThreshold: unhealthyThreshold,
 	}
 }
 
@@ -65,7 +71,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			pr.SetURL(backend.URL)
 			pr.SetXForwarded()
 		},
+		ModifyResponse: func(resp *http.Response) error {
+			if resp.StatusCode == http.StatusBadGateway ||
+				resp.StatusCode == http.StatusServiceUnavailable ||
+				resp.StatusCode == http.StatusGatewayTimeout {
+				health.RecordPassiveFailure(backend, p.unhealthyThreshold)
+			} else {
+				backend.RecordSuccess()
+			}
+			return nil
+		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
+			if req.Context().Err() == nil {
+				health.RecordPassiveFailure(backend, p.unhealthyThreshold)
+			}
 			log.Printf("proxy error [%s %s -> %s]: %v", req.Method, req.URL.Path, backend.URL.Host, err)
 			http.Error(rw, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		},

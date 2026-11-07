@@ -33,7 +33,7 @@ func main() {
 	checker := health.NewChecker(cfg.HealthCheck, rt.AllBackends)
 	go checker.Run(ctx)
 
-	handler := proxy.New(rt, cfg.Transport)
+	handler := proxy.New(rt, cfg.Transport, cfg.HealthCheck.UnhealthyThreshold)
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,
