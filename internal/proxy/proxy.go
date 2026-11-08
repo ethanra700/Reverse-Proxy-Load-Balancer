@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -55,23 +56,32 @@ func NewH2CTransport(cfg config.TransportConfig) *http.Transport {
 
 // Proxy routes incoming HTTP/1.1, HTTP/2 (h2c), and gRPC requests across healthy backends.
 type Proxy struct {
-	router             *router.Router
+	router             *router.DynamicRouter
 	http1Transport     *http.Transport
 	h2cTransport       *http.Transport
-	unhealthyThreshold int32
+	unhealthyThreshold atomic.Int32
 }
 
 // New creates a load-balanced L7 reverse proxy with HTTP/1.1 and h2c upstream pools.
-func New(r *router.Router, transportCfg config.TransportConfig, unhealthyThreshold int32) *Proxy {
+func New(r *router.DynamicRouter, transportCfg config.TransportConfig, unhealthyThreshold int32) *Proxy {
 	if unhealthyThreshold < 1 {
 		unhealthyThreshold = 3
 	}
-	return &Proxy{
-		router:             r,
-		http1Transport:     NewTransport(transportCfg),
-		h2cTransport:       NewH2CTransport(transportCfg),
-		unhealthyThreshold: unhealthyThreshold,
+	p := &Proxy{
+		router:         r,
+		http1Transport: NewTransport(transportCfg),
+		h2cTransport:   NewH2CTransport(transportCfg),
 	}
+	p.unhealthyThreshold.Store(unhealthyThreshold)
+	return p
+}
+
+// SetUnhealthyThreshold updates the passive failure threshold atomically on config reload.
+func (p *Proxy) SetUnhealthyThreshold(threshold int32) {
+	if threshold < 1 {
+		threshold = 3
+	}
+	p.unhealthyThreshold.Store(threshold)
 }
 
 // ServeHTTP matches the request path, selects the least-loaded healthy backend,
@@ -139,7 +149,7 @@ func (p *Proxy) forwardAttempt(
 			if resp.StatusCode == http.StatusBadGateway ||
 				resp.StatusCode == http.StatusServiceUnavailable ||
 				resp.StatusCode == http.StatusGatewayTimeout {
-				health.RecordPassiveFailure(backend, p.unhealthyThreshold)
+				health.RecordPassiveFailure(backend, p.unhealthyThreshold.Load())
 			} else {
 				backend.RecordSuccess()
 			}
@@ -147,7 +157,7 @@ func (p *Proxy) forwardAttempt(
 		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
 			if req.Context().Err() == nil {
-				health.RecordPassiveFailure(backend, p.unhealthyThreshold)
+				health.RecordPassiveFailure(backend, p.unhealthyThreshold.Load())
 			}
 			if attempt == 0 && canRetry(req, err) && pool.Next(tried...) != nil {
 				log.Printf("retrying [%s %s] after upstream error on %s: %v", req.Method, req.URL.Path, backend.URL.Host, err)

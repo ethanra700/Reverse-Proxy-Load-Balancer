@@ -15,6 +15,7 @@ import (
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to YAML configuration file")
+	watchInterval := flag.Duration("watch-interval", 2*time.Second, "config file polling interval for hot reload")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -26,14 +27,28 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to build router: %v", err)
 	}
+	dynRouter := router.NewDynamic(rt)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	checker := health.NewChecker(cfg.HealthCheck, rt.AllBackends)
+	checker := health.NewChecker(cfg.HealthCheck, dynRouter.AllBackends)
 	go checker.Run(ctx)
 
-	handler := proxy.New(rt, cfg.Transport, cfg.HealthCheck.UnhealthyThreshold)
+	handler := proxy.New(dynRouter, cfg.Transport, cfg.HealthCheck.UnhealthyThreshold)
+
+	applyConfig := func(nextCfg *config.Config) {
+		nextRT, err := router.New(nextCfg)
+		if err != nil {
+			log.Printf("hot reload failed: %v", err)
+			return
+		}
+		dynRouter.Swap(nextRT)
+		handler.SetUnhealthyThreshold(nextCfg.HealthCheck.UnhealthyThreshold)
+		log.Printf("hot reloaded config: pools=%d routes=%d", len(nextCfg.Pools), len(nextCfg.Routes))
+	}
+	go config.Watch(ctx, *configPath, *watchInterval, applyConfig)
+
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,

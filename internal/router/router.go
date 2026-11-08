@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/balancer"
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/config"
@@ -86,4 +87,44 @@ func matchesPrefix(path, prefix string) bool {
 		return strings.HasPrefix(path, prefix)
 	}
 	return path == prefix || strings.HasPrefix(path, prefix+"/")
+}
+
+// DynamicRouter wraps a Router inside an atomic.Pointer for lock-free zero-downtime hot reloads.
+type DynamicRouter struct {
+	current atomic.Pointer[Router]
+}
+
+// NewDynamic creates a DynamicRouter initialized with the given Router.
+func NewDynamic(initial *Router) *DynamicRouter {
+	d := &DynamicRouter{}
+	d.current.Store(initial)
+	return d
+}
+
+// Current returns the active Router snapshot.
+func (d *DynamicRouter) Current() *Router {
+	return d.current.Load()
+}
+
+// Swap atomically replaces the active Router without interrupting in-flight requests.
+func (d *DynamicRouter) Swap(next *Router) {
+	d.current.Store(next)
+}
+
+// Match delegates longest-prefix matching to the currently active Router snapshot.
+func (d *DynamicRouter) Match(path string) (*Route, bool) {
+	rt := d.current.Load()
+	if rt == nil {
+		return nil, false
+	}
+	return rt.Match(path)
+}
+
+// AllBackends returns all backends from the currently active Router snapshot.
+func (d *DynamicRouter) AllBackends() []*balancer.Backend {
+	rt := d.current.Load()
+	if rt == nil {
+		return nil
+	}
+	return rt.AllBackends()
 }

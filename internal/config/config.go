@@ -1,7 +1,9 @@
 package config
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"strings"
@@ -160,4 +162,44 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// Watch polls path using os.Stat ModTime at interval and invokes onReload whenever
+// the file changes and parses cleanly. Invalid configs are logged and ignored.
+func Watch(ctx context.Context, path string, interval time.Duration, onReload func(*Config)) {
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+
+	var lastMod time.Time
+	if info, err := os.Stat(path); err == nil {
+		lastMod = info.ModTime()
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			info, err := os.Stat(path)
+			if err != nil {
+				log.Printf("config watch: stat %q failed: %v", path, err)
+				continue
+			}
+			if info.ModTime().Equal(lastMod) {
+				continue
+			}
+			lastMod = info.ModTime()
+
+			cfg, err := Load(path)
+			if err != nil {
+				log.Printf("config watch: ignoring invalid config %q: %v", path, err)
+				continue
+			}
+			onReload(cfg)
+		}
+	}
 }
