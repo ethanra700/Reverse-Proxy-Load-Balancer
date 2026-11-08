@@ -37,6 +37,7 @@ func main() {
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,
+		Protocols:         proxy.NewServerProtocols(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

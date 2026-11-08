@@ -17,7 +17,16 @@ import (
 
 const maxAttempts = 2
 
-// NewTransport constructs an http.Transport tuned for persistent upstream connection pooling.
+// NewServerProtocols returns an http.Protocols configuration enabling both
+// HTTP/1.1 and cleartext HTTP/2 (h2c) on the frontend http.Server.
+func NewServerProtocols() *http.Protocols {
+	var p http.Protocols
+	p.SetHTTP1(true)
+	p.SetUnencryptedHTTP2(true)
+	return &p
+}
+
+// NewTransport constructs an HTTP/1.1 http.Transport tuned for persistent upstream connection pooling.
 func NewTransport(cfg config.TransportConfig) *http.Transport {
 	dialer := &net.Dialer{
 		Timeout:   cfg.DialTimeout,
@@ -34,21 +43,33 @@ func NewTransport(cfg config.TransportConfig) *http.Transport {
 	}
 }
 
-// Proxy routes incoming requests and load-balances them across healthy backends.
+// NewH2CTransport constructs an http.Transport configured for cleartext HTTP/2 (h2c)
+// upstream forwarding, preserving HTTP/2 streams and trailers for gRPC traffic.
+func NewH2CTransport(cfg config.TransportConfig) *http.Transport {
+	tr := NewTransport(cfg)
+	var protocols http.Protocols
+	protocols.SetUnencryptedHTTP2(true)
+	tr.Protocols = &protocols
+	return tr
+}
+
+// Proxy routes incoming HTTP/1.1, HTTP/2 (h2c), and gRPC requests across healthy backends.
 type Proxy struct {
 	router             *router.Router
-	transport          *http.Transport
+	http1Transport     *http.Transport
+	h2cTransport       *http.Transport
 	unhealthyThreshold int32
 }
 
-// New creates a load-balanced L7 reverse proxy using a pooled upstream transport.
+// New creates a load-balanced L7 reverse proxy with HTTP/1.1 and h2c upstream pools.
 func New(r *router.Router, transportCfg config.TransportConfig, unhealthyThreshold int32) *Proxy {
 	if unhealthyThreshold < 1 {
 		unhealthyThreshold = 3
 	}
 	return &Proxy{
 		router:             r,
-		transport:          NewTransport(transportCfg),
+		http1Transport:     NewTransport(transportCfg),
+		h2cTransport:       NewH2CTransport(transportCfg),
 		unhealthyThreshold: unhealthyThreshold,
 	}
 }
@@ -100,8 +121,16 @@ func (p *Proxy) forwardAttempt(
 	backend.IncActive()
 	defer backend.DecActive()
 
+	transport := p.http1Transport
+	var flushInterval time.Duration
+	if pool.Protocol == "h2c" || r.ProtoMajor == 2 {
+		transport = p.h2cTransport
+		flushInterval = -1
+	}
+
 	rp := &httputil.ReverseProxy{
-		Transport: p.transport,
+		Transport:     transport,
+		FlushInterval: flushInterval,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(backend.URL)
 			pr.SetXForwarded()
