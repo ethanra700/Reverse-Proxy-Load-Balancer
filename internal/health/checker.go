@@ -12,6 +12,7 @@ import (
 
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/balancer"
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/config"
+	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/metrics"
 )
 
 // Checker performs periodic active HTTP health checks against all configured backends.
@@ -21,10 +22,11 @@ type Checker struct {
 	path        string
 	client      *http.Client
 	getBackends func() []*balancer.Backend
+	metrics     *metrics.Metrics
 }
 
 // NewChecker creates an active health checker configured from HealthCheckConfig.
-func NewChecker(cfg config.HealthCheckConfig, getBackends func() []*balancer.Backend) *Checker {
+func NewChecker(cfg config.HealthCheckConfig, getBackends func() []*balancer.Backend, m *metrics.Metrics) *Checker {
 	dialer := &net.Dialer{
 		Timeout:   cfg.Timeout,
 		KeepAlive: 30 * time.Second,
@@ -34,12 +36,25 @@ func NewChecker(cfg config.HealthCheckConfig, getBackends func() []*balancer.Bac
 		MaxIdleConnsPerHost: 4,
 		IdleConnTimeout:     30 * time.Second,
 	}
-	return &Checker{
+	c := &Checker{
 		interval:    cfg.Interval,
 		timeout:     cfg.Timeout,
 		path:        cfg.Path,
 		client:      &http.Client{Transport: transport},
 		getBackends: getBackends,
+		metrics:     m,
+	}
+	c.SyncMetrics()
+	return c
+}
+
+// SyncMetrics initializes the health gauge for all currently configured backends.
+func (c *Checker) SyncMetrics() {
+	if c.metrics == nil {
+		return
+	}
+	for _, b := range c.getBackends() {
+		c.metrics.SetBackendHealthy(b.URL.Host, b.IsHealthy())
 	}
 }
 
@@ -81,6 +96,7 @@ func (c *Checker) CheckBackend(ctx context.Context, b *balancer.Backend) bool {
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, healthURL, nil)
 	if err != nil {
 		b.SetHealthy(false)
+		c.metrics.SetBackendHealthy(b.URL.Host, false)
 		return false
 	}
 
@@ -94,6 +110,7 @@ func (c *Checker) CheckBackend(ctx context.Context, b *balancer.Backend) bool {
 
 	prev := b.IsHealthy()
 	b.SetHealthy(healthy)
+	c.metrics.SetBackendHealthy(b.URL.Host, healthy)
 	if prev != healthy {
 		if healthy {
 			log.Printf("health check [%s]: recovered (healthy=true)", b.URL.Host)
@@ -105,8 +122,9 @@ func (c *Checker) CheckBackend(ctx context.Context, b *balancer.Backend) bool {
 }
 
 // RecordPassiveFailure updates a backend's consecutive failure count and logs if tripped unhealthy.
-func RecordPassiveFailure(b *balancer.Backend, threshold int32) bool {
+func RecordPassiveFailure(b *balancer.Backend, threshold int32, m *metrics.Metrics) bool {
 	if b.RecordFailure(threshold) {
+		m.SetBackendHealthy(b.URL.Host, false)
 		log.Printf("passive health [%s]: tripped unhealthy after %d consecutive failures", b.URL.Host, threshold)
 		return true
 	}

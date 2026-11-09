@@ -13,6 +13,7 @@ import (
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/balancer"
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/config"
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/health"
+	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/metrics"
 	"github.com/ethanra700/Reverse-Proxy-Load-Balancer/internal/router"
 )
 
@@ -59,11 +60,12 @@ type Proxy struct {
 	router             *router.DynamicRouter
 	http1Transport     *http.Transport
 	h2cTransport       *http.Transport
+	metrics            *metrics.Metrics
 	unhealthyThreshold atomic.Int32
 }
 
 // New creates a load-balanced L7 reverse proxy with HTTP/1.1 and h2c upstream pools.
-func New(r *router.DynamicRouter, transportCfg config.TransportConfig, unhealthyThreshold int32) *Proxy {
+func New(r *router.DynamicRouter, transportCfg config.TransportConfig, unhealthyThreshold int32, m *metrics.Metrics) *Proxy {
 	if unhealthyThreshold < 1 {
 		unhealthyThreshold = 3
 	}
@@ -71,6 +73,7 @@ func New(r *router.DynamicRouter, transportCfg config.TransportConfig, unhealthy
 		router:         r,
 		http1Transport: NewTransport(transportCfg),
 		h2cTransport:   NewH2CTransport(transportCfg),
+		metrics:        m,
 	}
 	p.unhealthyThreshold.Store(unhealthyThreshold)
 	return p
@@ -93,9 +96,11 @@ func (p *Proxy) CloseIdleConnections() {
 // ServeHTTP matches the request path, selects the least-loaded healthy backend,
 // and retries once on retryable upstream failures.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	route, ok := p.router.Match(r.URL.Path)
 	if !ok {
 		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		p.metrics.RecordRequest("unmatched", "none", http.StatusNotFound, time.Since(start))
 		return
 	}
 
@@ -103,22 +108,28 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		backend := route.Pool.Next(tried...)
 		if backend == nil {
+			status := http.StatusBadGateway
+			msg := http.StatusText(http.StatusBadGateway)
 			if attempt == 0 {
-				http.Error(w, "no healthy upstream backends", http.StatusServiceUnavailable)
-			} else {
-				http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+				status = http.StatusServiceUnavailable
+				msg = "no healthy upstream backends"
 			}
+			http.Error(w, msg, status)
+			p.metrics.RecordRequest(route.Prefix, "none", status, time.Since(start))
 			return
 		}
 		tried = append(tried, backend)
 
-		if !p.forwardAttempt(w, r, backend, route.Pool, attempt, tried) {
+		status, shouldRetry := p.forwardAttempt(w, r, backend, route.Pool, attempt, tried)
+		if !shouldRetry {
+			p.metrics.RecordRequest(route.Prefix, backend.URL.Host, status, time.Since(start))
 			return
 		}
 		if r.GetBody != nil {
 			body, err := r.GetBody()
 			if err != nil {
 				http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+				p.metrics.RecordRequest(route.Prefix, backend.URL.Host, http.StatusBadGateway, time.Since(start))
 				return
 			}
 			r.Body = body
@@ -133,9 +144,13 @@ func (p *Proxy) forwardAttempt(
 	pool *balancer.Pool,
 	attempt int,
 	tried []*balancer.Backend,
-) (shouldRetry bool) {
-	backend.IncActive()
-	defer backend.DecActive()
+) (statusCode int, shouldRetry bool) {
+	active := backend.IncActive()
+	p.metrics.SetActiveConnections(backend.URL.Host, active)
+	defer func() {
+		remaining := backend.DecActive()
+		p.metrics.SetActiveConnections(backend.URL.Host, remaining)
+	}()
 
 	transport := p.http1Transport
 	var flushInterval time.Duration
@@ -144,6 +159,7 @@ func (p *Proxy) forwardAttempt(
 		flushInterval = -1
 	}
 
+	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 	rp := &httputil.ReverseProxy{
 		Transport:     transport,
 		FlushInterval: flushInterval,
@@ -155,7 +171,7 @@ func (p *Proxy) forwardAttempt(
 			if resp.StatusCode == http.StatusBadGateway ||
 				resp.StatusCode == http.StatusServiceUnavailable ||
 				resp.StatusCode == http.StatusGatewayTimeout {
-				health.RecordPassiveFailure(backend, p.unhealthyThreshold.Load())
+				health.RecordPassiveFailure(backend, p.unhealthyThreshold.Load(), p.metrics)
 			} else {
 				backend.RecordSuccess()
 			}
@@ -163,7 +179,7 @@ func (p *Proxy) forwardAttempt(
 		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
 			if req.Context().Err() == nil {
-				health.RecordPassiveFailure(backend, p.unhealthyThreshold.Load())
+				health.RecordPassiveFailure(backend, p.unhealthyThreshold.Load(), p.metrics)
 			}
 			if attempt == 0 && canRetry(req, err) && pool.Next(tried...) != nil {
 				log.Printf("retrying [%s %s] after upstream error on %s: %v", req.Method, req.URL.Path, backend.URL.Host, err)
@@ -174,8 +190,32 @@ func (p *Proxy) forwardAttempt(
 			http.Error(rw, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		},
 	}
-	rp.ServeHTTP(w, r)
-	return shouldRetry
+	rp.ServeHTTP(rec, r)
+	return rec.status, shouldRetry
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if !s.wroteHeader {
+		s.status = code
+		s.wroteHeader = true
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Flush() {
+	if flusher, ok := s.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (s *statusRecorder) Unwrap() http.ResponseWriter {
+	return s.ResponseWriter
 }
 
 func canRetry(r *http.Request, err error) bool {
