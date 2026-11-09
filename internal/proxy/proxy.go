@@ -84,6 +84,12 @@ func (p *Proxy) SetUnhealthyThreshold(threshold int32) {
 	p.unhealthyThreshold.Store(threshold)
 }
 
+// CloseIdleConnections closes any idle connections held in the upstream transports.
+func (p *Proxy) CloseIdleConnections() {
+	p.http1Transport.CloseIdleConnections()
+	p.h2cTransport.CloseIdleConnections()
+}
+
 // ServeHTTP matches the request path, selects the least-loaded healthy backend,
 // and retries once on retryable upstream failures.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
