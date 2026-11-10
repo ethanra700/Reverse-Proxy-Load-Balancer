@@ -1,0 +1,37 @@
+listen_addr: ":8080"
+
+health_check:
+  interval: 5s
+  timeout: 2s
+  path: "/health"
+  unhealthy_threshold: 3
+
+transport:
+  max_idle_conns: 256
+  max_idle_conns_per_host: 64
+  idle_conn_timeout: 90s
+  dial_timeout: 5s
+  response_header_timeout: 10s
+
+pools:
+  http-backends:
+    backends:
+      - "http://http-1:8081"
+      - "http://http-2:8082"
+      - "http://http-3:8083"
+  grpc-backends:
+    protocol: "h2c"
+    backends:
+      - "http://grpc-1:9001"
+      - "http://grpc-2:9002"
+      - "http://grpc-3:9003"
+
+routes:
+  - prefix: "/api"
+    pool: "http-backends"
+  - prefix: "/echo.EchoService"
+    pool: "grpc-backends"
+  - prefix: "/grpc"
+    pool: "grpc-backends"
+  - prefix: "/"
+    pool: "http-backends"

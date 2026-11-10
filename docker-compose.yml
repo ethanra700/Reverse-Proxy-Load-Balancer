@@ -1,0 +1,63 @@
+services:
+  proxy:
+    build: .
+    image: l7-reverse-proxy:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.docker.yaml:/etc/proxy/config.yaml:ro
+    depends_on:
+      - http-1
+      - http-2
+      - http-3
+      - grpc-1
+      - grpc-2
+      - grpc-3
+
+  http-1:
+    image: l7-reverse-proxy:latest
+    build: .
+    entrypoint: ["/usr/local/bin/dummy-http"]
+    environment:
+      BACKEND_ID: "http-1"
+      LISTEN_ADDR: ":8081"
+
+  http-2:
+    image: l7-reverse-proxy:latest
+    build: .
+    entrypoint: ["/usr/local/bin/dummy-http"]
+    environment:
+      BACKEND_ID: "http-2"
+      LISTEN_ADDR: ":8082"
+
+  http-3:
+    image: l7-reverse-proxy:latest
+    build: .
+    entrypoint: ["/usr/local/bin/dummy-http"]
+    environment:
+      BACKEND_ID: "http-3"
+      LISTEN_ADDR: ":8083"
+
+  grpc-1:
+    image: l7-reverse-proxy:latest
+    build: .
+    entrypoint: ["/usr/local/bin/dummy-grpc"]
+    environment:
+      BACKEND_ID: "grpc-1"
+      LISTEN_ADDR: ":9001"
+
+  grpc-2:
+    image: l7-reverse-proxy:latest
+    build: .
+    entrypoint: ["/usr/local/bin/dummy-grpc"]
+    environment:
+      BACKEND_ID: "grpc-2"
+      LISTEN_ADDR: ":9002"
+
+  grpc-3:
+    image: l7-reverse-proxy:latest
+    build: .
+    entrypoint: ["/usr/local/bin/dummy-grpc"]
+    environment:
+      BACKEND_ID: "grpc-3"
+      LISTEN_ADDR: ":9003"
